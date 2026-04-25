@@ -1,5 +1,7 @@
 aiogram
 aiosqlite
 requests
+sys
+string
 python-dotenv
 aiohttp
