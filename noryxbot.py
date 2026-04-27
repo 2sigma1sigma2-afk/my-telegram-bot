@@ -161,7 +161,7 @@ async def download_beta(callback: CallbackQuery):
     if u[2] not in ['BETA', 'VIP']:
         await callback.answer("❌ Нет доступа!", show_alert=True)
         return
-    await callback.message.edit_text(f"📁 **СБОРКА NORYX BETA**\n{LINE}\n🔗 [СКАЧАТЬ](https://t.me/illusiononce)\n🗝 Пароль: `NORYX2026`", parse_mode="Markdown", reply_markup=get_back_kb())
+    await callback.message.edit_text(f"📁 **СБОРКА NORYX BETA**\n{LINE}\n🔗 [СКАЧАТЬ](https://workupload.com/file/Rk26YKHQdYJ)\n🗝 Пароль: `Нету`", parse_mode="Markdown", reply_markup=get_back_kb())
 
 # --- 🛡 АДМИНКА ---
 @dp.callback_query(F.data == "admin_main")
