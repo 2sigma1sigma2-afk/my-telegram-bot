@@ -18,21 +18,12 @@ from aiogram.fsm.state import State, StatesGroup
 BOT_TOKEN = '7716127075:AAEs55gkC1Dk6NcC9tAdkW-6oM-5bRcag-w'
 OWNER_USERNAME = 'illusiononce'
 
-# Цены и префиксы
-PRICES = {'7': 35, '30': 120, 'life': 175}
+# Путь к БД: /app/data/ для Railway (нужен Volume), иначе локально
+DB_PATH = '/app/data/noryx_users.db' if os.path.exists('/app/data') else 'noryx_users.db'
+
+PRICES = {'7': 35, '30': 120, 'life': 175} # Цены в Telegram Stars
 ALLOWED_PREFIXES = ["ЧСВ", "Красавчик", "Буст", "Ez"]
 LINE = "━━━━━━━━━━━━━━━━━━━━"
-
-WELCOME_MSG = (
-    "🌟 **NORYX PAY — ТВОЙ ВЫБОР** 🌟\n"
-    f"{LINE}\n"
-    "🚀 Управляй подпиской, меняй префиксы и скачивай эксклюзивные сборки.\n\n"
-    "💎 **Выбери раздел в меню:**"
-)
-
-def generate_password(length=12):
-    chars = string.ascii_letters + string.digits
-    return ''.join(random.choice(chars) for _ in range(length))
 
 # ==================================================
 
@@ -40,24 +31,21 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+class AuthStates(StatesGroup):
+    reg_username = State()
+    reg_password = State()
+    login_username = State()
+    login_password = State()
+
 class BotStates(StatesGroup):
     waiting_for_promo = State()
     waiting_for_key = State()
     waiting_for_activations = State()
     gen_days = State()
 
-class AuthStates(StatesGroup):
-    reg_username = State()
-    reg_choice = State() 
-    reg_password = State() 
-    login_username = State()
-    login_password = State()
-    change_password = State()
-
-# --- 🛠 РАБОТА С БД ---
+# --- 🛠 БАЗА ДАННЫХ ---
 async def init_db():
-    async with aiosqlite.connect('noryx_users.db') as db:
-        # Оригинальная таблица
+    async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('''CREATE TABLE IF NOT EXISTS users (
             uid INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER UNIQUE,
@@ -66,314 +54,282 @@ async def init_db():
             prefix TEXT DEFAULT '',
             role TEXT DEFAULT 'FREE',
             expiry_date TEXT DEFAULT 'Нет',
-            discount REAL DEFAULT 0.0
+            discount REAL DEFAULT 0.0,
+            app_username TEXT UNIQUE,
+            app_password TEXT
         )''')
-        
         await db.execute('''CREATE TABLE IF NOT EXISTS generated_keys (
             key_code TEXT PRIMARY KEY,
             days INTEGER,
             role TEXT DEFAULT 'BETA',
             activations_left INTEGER DEFAULT 1
         )''')
-        
-        # Миграции (добавление колонок логина/пароля в твою старую БД)
-        try: await db.execute("ALTER TABLE users ADD COLUMN app_username TEXT")
-        except: pass
-        try: await db.execute("ALTER TABLE users ADD COLUMN app_password TEXT")
-        except: pass
         await db.commit()
 
-async def get_user_data(user_id: int, first_name: str, username: str):
-    async with aiosqlite.connect('noryx_users.db') as db:
-        async with db.execute("SELECT uid, prefix, role, expiry_date, discount, app_username FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            user = await cursor.fetchone()
-        if not user:
-            await db.execute("INSERT INTO users (user_id, first_name, username) VALUES (?, ?, ?)", (user_id, first_name, username))
-            await db.commit()
-            return await get_user_data(user_id, first_name, username)
-    return user
+async def get_user_by_tg(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            return await cursor.fetchone()
 
 # --- ⌨️ КЛАВИАТУРЫ ---
 def get_auth_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📝 Регистрация", callback_data="auth_reg")],
-        [InlineKeyboardButton(text="🔑 Войти", callback_data="auth_login")]
+        [InlineKeyboardButton(text="🔑 Войти", callback_data="auth_login"),
+         InlineKeyboardButton(text="📝 Регистрация", callback_data="auth_reg")]
     ])
 
-def get_reg_choice_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⌨️ Свой пароль", callback_data="pass_own")],
-        [InlineKeyboardButton(text="🎲 Рандомный", callback_data="pass_random")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_auth")]
-    ])
-
-def get_main_kb(username: str, role: str):
+def get_main_kb(role: str, tg_username: str):
     kb = [
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
          InlineKeyboardButton(text="🎭 Префиксы", callback_data="prefix_menu")],
-        [InlineKeyboardButton(text="🔑 Активация", callback_data="activate_key"),
+        [InlineKeyboardButton(text="🔑 Ключ", callback_data="activate_key"),
          InlineKeyboardButton(text="🛒 Магазин", callback_data="buy_beta")],
         [InlineKeyboardButton(text="🎁 Промокод", callback_data="promo")]
     ]
     if role in ['BETA', 'VIP']:
         kb.insert(2, [InlineKeyboardButton(text="📁 СКАЧАТЬ BETA", callback_data="download_beta")])
-    if username == OWNER_USERNAME:
+    
+    # Проверка админа
+    if tg_username and tg_username.lower() == OWNER_USERNAME.lower():
         kb.append([InlineKeyboardButton(text="⚡ АДМИНКА ⚡", callback_data="admin_main")])
+    
+    kb.append([InlineKeyboardButton(text="🚪 Выйти из аккаунта", callback_data="logout")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-def get_profile_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Сменить пароль", callback_data="change_pass_start")],
-        [InlineKeyboardButton(text="🚪 Выйти", callback_data="logout")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")]
-    ])
+def get_back_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")]])
 
-def get_back_kb(target="back_main"):
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data=target)]])
+# --- 🔐 ВХОД / РЕГИСТРАЦИЯ / ВЫХОД ---
 
-# --- 🔐 АВТОРИЗАЦИЯ ---
-
-@dp.callback_query(F.data == "auth_reg")
-async def auth_reg_start(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(AuthStates.reg_username)
-    await callback.message.edit_text("📝 Введите логин для регистрации:", reply_markup=get_back_kb("back_to_auth"))
-
-@dp.message(AuthStates.reg_username)
-async def auth_reg_user(message: Message, state: FSMContext):
-    app_user = message.text.strip()
-    async with aiosqlite.connect('noryx_users.db') as db:
-        async with db.execute("SELECT uid FROM users WHERE app_username = ?", (app_user,)) as cur:
-            if await cur.fetchone():
-                await message.answer("❌ Логин занят!")
-                return
-    await state.update_data(reg_username=app_user)
-    await state.set_state(AuthStates.reg_choice)
-    await message.answer(f"Логин `{app_user}` свободен. Выберите пароль:", parse_mode="Markdown", reply_markup=get_reg_choice_kb())
-
-@dp.callback_query(AuthStates.reg_choice, F.data == "pass_random")
-async def reg_pass_random(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    login, new_pass = data['reg_username'], generate_password()
-    async with aiosqlite.connect('noryx_users.db') as db:
-        await db.execute("UPDATE users SET app_username=?, app_password=? WHERE user_id=?", (login, new_pass, callback.from_user.id))
-        await db.commit()
-    await state.clear()
-    u = await get_user_data(callback.from_user.id, callback.from_user.first_name, callback.from_user.username)
-    await callback.message.edit_text(f"✅ Готово!\nЛогин: `{login}`\nПароль: `{new_pass}`", parse_mode="Markdown")
-    await callback.message.answer(WELCOME_MSG, parse_mode="Markdown", reply_markup=get_main_kb(callback.from_user.username, u[2]))
-
-@dp.callback_query(AuthStates.reg_choice, F.data == "pass_own")
-async def reg_pass_own_start(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(AuthStates.reg_password)
-    await callback.message.edit_text("🔒 Введите свой пароль:")
-
-@dp.message(AuthStates.reg_password)
-async def reg_pass_own_finish(message: Message, state: FSMContext):
-    data = await state.get_data()
-    async with aiosqlite.connect('noryx_users.db') as db:
-        await db.execute("UPDATE users SET app_username=?, app_password=? WHERE user_id=?", (data['reg_username'], message.text.strip(), message.from_user.id))
-        await db.commit()
-    await state.clear()
-    u = await get_user_data(message.from_user.id, message.from_user.first_name, message.from_user.username)
-    await message.answer("✅ Успешно зарегистрированы!", reply_markup=get_main_kb(message.from_user.username, u[2]))
-
-@dp.callback_query(F.data == "auth_login")
-async def auth_login_start(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(AuthStates.login_username)
-    await callback.message.edit_text("🔑 Введите Логин:")
-
-@dp.message(AuthStates.login_username)
-async def auth_login_user(message: Message, state: FSMContext):
-    await state.update_data(login_username=message.text.strip())
-    await state.set_state(AuthStates.login_password)
-    await message.answer("🔒 Введите Пароль:")
-
-@dp.message(AuthStates.login_password)
-async def auth_login_pass(message: Message, state: FSMContext):
-    data = await state.get_data()
-    async with aiosqlite.connect('noryx_users.db') as db:
-        async with db.execute("SELECT uid, app_password FROM users WHERE app_username=?", (data['login_username'],)) as cur:
-            acc = await cur.fetchone()
-        if acc and acc[1] == message.text.strip():
-            await db.execute("UPDATE users SET user_id=NULL WHERE user_id=?", (message.from_user.id,))
-            await db.execute("UPDATE users SET user_id=? WHERE uid=?", (message.from_user.id, acc[0]))
-            await db.commit()
-            await state.clear()
-            u = await get_user_data(message.from_user.id, message.from_user.first_name, message.from_user.username)
-            await message.answer("✅ Вход выполнен!", reply_markup=get_main_kb(message.from_user.username, u[2]))
-        else:
-            await message.answer("❌ Ошибка входа!", reply_markup=get_auth_kb())
-
-# --- 📁 СКАЧАТЬ (ИСПРАВЛЕНО) ---
-@dp.callback_query(F.data == "download_beta")
-async def download_beta(callback: CallbackQuery):
-    u = await get_user_data(callback.from_user.id, callback.from_user.first_name, callback.from_user.username)
-    if u[2] in ['BETA', 'VIP']:
-        await callback.message.answer("🚀 [СКАЧАТЬ BETA СБОРКУ](https://t.me/your_link)", parse_mode="Markdown")
-    await callback.answer()
-
-# --- 👤 ПРОФИЛЬ И СМЕНА ПАРОЛЯ ---
-@dp.callback_query(F.data == "change_pass_start")
-async def change_pass_start(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(AuthStates.change_password)
-    await callback.message.edit_text("📝 Введите новый пароль:", reply_markup=get_back_kb("profile"))
-
-@dp.message(AuthStates.change_password)
-async def change_pass_finish(message: Message, state: FSMContext):
-    async with aiosqlite.connect('noryx_users.db') as db:
-        await db.execute("UPDATE users SET app_password = ? WHERE user_id = ?", (message.text.strip(), message.from_user.id))
-        await db.commit()
-    await state.clear()
-    await message.answer("✅ Пароль обновлен!")
-    await call_profile(message)
-
-@dp.callback_query(F.data == "logout")
-async def logout_handler(callback: CallbackQuery):
-    async with aiosqlite.connect('noryx_users.db') as db:
-        await db.execute("UPDATE users SET user_id = NULL WHERE user_id = ?", (callback.from_user.id,))
-        await db.commit()
-    await callback.message.edit_text("👋 Вы вышли.", reply_markup=get_auth_kb())
-
-@dp.callback_query(F.data == "profile")
-async def call_profile(union: [CallbackQuery, Message]):
-    u = await get_user_data(union.from_user.id, union.from_user.first_name, union.from_user.username)
-    text = (f"👤 **ПРОФИЛЬ**\n{LINE}\n🆔 UID: `{u[0]}`\n🔑 Логин: `{u[5]}`\n👑 Роль: `{u[2]}`\n⏳ До: `{u[3]}`\n{LINE}")
-    kb = get_profile_kb()
-    if isinstance(union, CallbackQuery): await union.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
-    else: await union.answer(text, parse_mode="Markdown", reply_markup=kb)
-
-# --- 🛡 АДМИНКА (ИСПРАВЛЕНО) ---
-@dp.callback_query(F.data == "admin_main")
-async def admin_main(callback: CallbackQuery):
-    if callback.from_user.username != OWNER_USERNAME: return
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👥 Юзеры", callback_data="admin_users")],
-        [InlineKeyboardButton(text="🔑 Создать ключ", callback_data="admin_gen_menu")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")]
-    ])
-    await callback.message.edit_text("🛡 АДМИНКА", reply_markup=kb)
-
-@dp.callback_query(F.data == "admin_users")
-async def admin_users(callback: CallbackQuery):
-    if callback.from_user.username != OWNER_USERNAME: return
-    async with aiosqlite.connect('noryx_users.db') as db:
-        async with db.execute("SELECT first_name, role, app_username FROM users LIMIT 20") as cur:
-            users = await cur.fetchall()
-    msg = "👥 **ЮЗЕРЫ:**\n" + "\n".join([f"• {u[0]} [{u[2]}] - {u[1]}" for u in users])
-    await callback.message.edit_text(msg, reply_markup=get_back_kb("admin_main"))
-
-@dp.callback_query(F.data == "admin_gen_menu")
-async def admin_gen_menu(callback: CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="7д", callback_data="prep_7"), InlineKeyboardButton(text="30д", callback_data="prep_30")],
-        [InlineKeyboardButton(text="∞", callback_data="prep_9999"), InlineKeyboardButton(text="◀️ Назад", callback_data="admin_main")]
-    ])
-    await callback.message.edit_text("🔑 СРОК КЛЮЧА:", reply_markup=kb)
-
-@dp.callback_query(F.data.startswith("prep_"))
-async def start_gen_key(callback: CallbackQuery, state: FSMContext):
-    await state.update_data(gen_days=int(callback.data.split("_")[1]))
-    await state.set_state(BotStates.waiting_for_activations)
-    await callback.message.edit_text("🔢 Кол-во активаций:")
-
-@dp.message(BotStates.waiting_for_activations)
-async def finish_gen_key(message: Message, state: FSMContext):
-    if not message.text.isdigit(): return
-    data, key = await state.get_data(), f"NORYX-{''.join(random.choices(string.ascii_uppercase + string.digits, k=8))}"
-    async with aiosqlite.connect('noryx_users.db') as db:
-        await db.execute("INSERT INTO generated_keys VALUES (?, ?, ?, ?)", (key, data['gen_days'], 'VIP' if data['gen_days']==9999 else 'BETA', int(message.text)))
-        await db.commit()
-    await state.clear()
-    await message.answer(f"✅ Ключ: `{key}`", reply_markup=get_back_kb("admin_main"))
-
-# --- 🚀 СТАРТ И ОБЩЕЕ ---
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    u = await get_user_data(message.from_user.id, message.from_user.first_name, message.from_user.username)
-    if not u[5]: await message.answer("👋 Привет! Авторизуйтесь:", reply_markup=get_auth_kb())
-    else: await message.answer(WELCOME_MSG, parse_mode="Markdown", reply_markup=get_main_kb(message.from_user.username, u[2]))
+    user = await get_user_by_tg(message.from_user.id)
+    if not user:
+        await message.answer("👋 Добро пожаловать!\nДля доступа к системе авторизуйтесь:", reply_markup=get_auth_kb())
+    else:
+        await message.answer(f"🌟 **NORYX — МЕНЮ**\n{LINE}\nВы вошли как: `{user[8]}`", parse_mode="Markdown", reply_markup=get_main_kb(user[5], message.from_user.username))
 
-@dp.callback_query(F.data == "back_main")
-async def back_main(callback: CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data == "logout")
+async def process_logout(callback: CallbackQuery, state: FSMContext):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET user_id = NULL WHERE user_id = ?", (callback.from_user.id,))
+        await db.commit()
     await state.clear()
-    u = await get_user_data(callback.from_user.id, callback.from_user.first_name, callback.from_user.username)
-    await callback.message.edit_text(WELCOME_MSG, parse_mode="Markdown", reply_markup=get_main_kb(callback.from_user.username, u[2]))
+    await callback.message.edit_text("🚪 Вы успешно вышли из аккаунта.\nВойдите снова или зарегистрируйтесь:", reply_markup=get_auth_kb())
+
+# Логика регистрации
+@dp.callback_query(F.data == "auth_reg")
+async def reg_1(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AuthStates.reg_username)
+    await callback.message.edit_text("📝 Введите логин для нового аккаунта:")
+
+@dp.message(AuthStates.reg_username)
+async def reg_2(message: Message, state: FSMContext):
+    name = message.text.strip()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT uid FROM users WHERE app_username = ?", (name,)) as cur:
+            if await cur.fetchone():
+                await message.answer("❌ Этот логин занят! Введите другой:")
+                return
+    await state.update_data(reg_username=name)
+    await state.set_state(AuthStates.reg_password)
+    await message.answer("🔒 Придумайте пароль:")
+
+@dp.message(AuthStates.reg_password)
+async def reg_3(message: Message, state: FSMContext):
+    data = await state.get_data()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT INTO users (user_id, first_name, username, app_username, app_password) VALUES (?, ?, ?, ?, ?)",
+                         (message.from_user.id, message.from_user.first_name, message.from_user.username, data['reg_username'], message.text.strip()))
+        await db.commit()
+    await state.clear()
+    await message.answer("✅ Аккаунт создан! Теперь вы в системе.", reply_markup=get_main_kb("FREE", message.from_user.username))
+
+# Логика входа
+@dp.callback_query(F.data == "auth_login")
+async def login_1(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AuthStates.login_username)
+    await callback.message.edit_text("🔑 Введите ваш логин:")
+
+@dp.message(AuthStates.login_username)
+async def login_2(message: Message, state: FSMContext):
+    await state.update_data(login_username=message.text.strip())
+    await state.set_state(AuthStates.login_password)
+    await message.answer("🔒 Введите пароль:")
+
+@dp.message(AuthStates.login_password)
+async def login_3(message: Message, state: FSMContext):
+    data = await state.get_data()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT * FROM users WHERE app_username = ? AND app_password = ?", (data['login_username'], message.text.strip())) as cur:
+            user = await cur.fetchone()
+        if user:
+            # Перепривязываем ТГ
+            await db.execute("UPDATE users SET user_id = NULL WHERE user_id = ?", (message.from_user.id,))
+            await db.execute("UPDATE users SET user_id = ? WHERE uid = ?", (message.from_user.id, user[0]))
+            await db.commit()
+            await state.clear()
+            await message.answer(f"✅ Вход выполнен! Добро пожаловать, {data['login_username']}", reply_markup=get_main_kb(user[5], message.from_user.username))
+        else:
+            await message.answer("❌ Неверный логин или пароль!", reply_markup=get_auth_kb())
+
+# --- 👤 ПРОФИЛЬ И ПРЕФИКСЫ ---
+
+@dp.callback_query(F.data == "profile")
+async def show_profile(callback: CallbackQuery):
+    u = await get_user_by_tg(callback.from_user.id)
+    if not u: return
+    text = (f"👤 **ПРОФИЛЬ**\n{LINE}\n🔑 Логин: `{u[8]}`\n🆔 UID: `{u[0]}`\n👑 Роль: `{u[5]}`\n⏳ Срок: `{u[6]}`\n🎭 Префикс: `{u[4] if u[4] else 'Нет'}`\n{LINE}")
+    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=get_back_kb())
 
 @dp.callback_query(F.data == "prefix_menu")
 async def prefix_menu(callback: CallbackQuery):
-    btns = [[InlineKeyboardButton(text=f"💠 {p}", callback_data=f"setp_{p}")] for p in ALLOWED_PREFIXES]
-    btns.append([InlineKeyboardButton(text="🗑 Сброс", callback_data="setp_clear"), InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")])
-    await callback.message.edit_text("🎭 ПРЕФИКСЫ:", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
+    kb = [[InlineKeyboardButton(text=f"💠 {p}", callback_data=f"setp_{p}")] for p in ALLOWED_PREFIXES]
+    kb.append([InlineKeyboardButton(text="🗑 Сбросить", callback_data="setp_clear")])
+    kb.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")])
+    await callback.message.edit_text("🎭 **ВЫБОР ПРЕФИКСА:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @dp.callback_query(F.data.startswith("setp_"))
-async def set_user_prefix(callback: CallbackQuery):
-    new_pref = "" if "clear" in callback.data else callback.data.split("_")[1]
-    async with aiosqlite.connect('noryx_users.db') as db:
-        await db.execute("UPDATE users SET prefix = ? WHERE user_id = ?", (new_pref, callback.from_user.id))
+async def set_prefix(callback: CallbackQuery):
+    p = "" if "clear" in callback.data else callback.data.split("_")[1]
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET prefix = ? WHERE user_id = ?", (p, callback.from_user.id))
         await db.commit()
-    await callback.answer("✅ Готово!")
+    await callback.answer(f"✅ Готово!")
     await prefix_menu(callback)
 
-# --- 🔑 АКТИВАЦИЯ КЛЮЧЕЙ ---
-@dp.callback_query(F.data == "activate_key")
-async def call_activate(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(BotStates.waiting_for_key)
-    await callback.message.edit_text("🔑 Введите ключ:", reply_markup=get_back_kb())
-
-@dp.message(BotStates.waiting_for_key)
-async def proc_key(message: Message, state: FSMContext):
-    async with aiosqlite.connect('noryx_users.db') as db:
-        async with db.execute("SELECT days, role, activations_left FROM generated_keys WHERE key_code=?", (message.text.strip(),)) as cur:
-            data = await cur.fetchone()
-        if data:
-            days, role, left = data
-            exp = "Навсегда" if days == 9999 else (datetime.now() + timedelta(days=days)).strftime("%d.%m.%Y")
-            await db.execute("UPDATE users SET role=?, expiry_date=? WHERE user_id=?", (role, exp, message.from_user.id))
-            if left > 1: await db.execute("UPDATE generated_keys SET activations_left=activations_left-1 WHERE key_code=?", (message.text.strip(),))
-            else: await db.execute("DELETE FROM generated_keys WHERE key_code=?", (message.text.strip(),))
-            await db.commit()
-            await state.clear()
-            await message.answer("✅ Активировано!", reply_markup=get_main_kb(message.from_user.username, role))
-        else: await message.answer("❌ Неверный ключ!")
-
 # --- 🛒 МАГАЗИН ---
+
 @dp.callback_query(F.data == "buy_beta")
 async def shop_menu(callback: CallbackQuery):
-    u = await get_user_data(callback.from_user.id, callback.from_user.first_name, callback.from_user.username)
-    def pr(p): return math.ceil(p * (1 - u[4]))
+    u = await get_user_by_tg(callback.from_user.id)
+    def calc(p): return math.ceil(p * (1 - u[7]))
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"7д • {pr(PRICES['7'])} ⭐", callback_data="starbuy_7")],
-        [InlineKeyboardButton(text=f"30д • {pr(PRICES['30'])} ⭐", callback_data="starbuy_30")],
-        [InlineKeyboardButton(text=f"Навсегда • {pr(PRICES['life'])} ⭐", callback_data="starbuy_life")],
+        [InlineKeyboardButton(text=f"7 дней — {calc(PRICES['7'])} ⭐", callback_data="pay_7")],
+        [InlineKeyboardButton(text=f"30 дней — {calc(PRICES['30'])} ⭐", callback_data="pay_30")],
+        [InlineKeyboardButton(text=f"Навсегда — {calc(PRICES['life'])} ⭐", callback_data="pay_life")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")]
     ])
-    await callback.message.edit_text("🛒 МАГАЗИН", reply_markup=kb)
+    await callback.message.edit_text("🛒 **МАГАЗИН ПОДПИСОК:**", reply_markup=kb)
 
-@dp.callback_query(F.data.startswith("starbuy_"))
-async def send_invoice(callback: CallbackQuery):
-    p = callback.data.split("_")[1]
-    u = await get_user_data(callback.from_user.id, callback.from_user.first_name, callback.from_user.username)
-    cost = PRICES['7'] if p=='7' else (PRICES['30'] if p=='30' else PRICES['life'])
-    await bot.send_invoice(callback.from_user.id, title=f"Noryx {p}", description="Sub", payload=f"sub_{p}", 
-                           provider_token="", currency="XTR", prices=[LabeledPrice(label="XTR", amount=math.ceil(cost*(1-u[4])))])
+@dp.callback_query(F.data.startswith("pay_"))
+async def create_invoice(callback: CallbackQuery):
+    plan = callback.data.split("_")[1]
+    u = await get_user_by_tg(callback.from_user.id)
+    cost = PRICES['7'] if plan=='7' else (PRICES['30'] if plan=='30' else PRICES['life'])
+    final_cost = math.ceil(cost * (1 - u[7]))
+    
+    await bot.send_invoice(
+        callback.from_user.id, title=f"Noryx Beta ({plan} d)",
+        description=f"Активация доступа к читу на срок: {plan}",
+        payload=f"sub_{plan}", provider_token="", currency="XTR",
+        prices=[LabeledPrice(label="XTR", amount=final_cost)]
+    )
+    await callback.answer()
 
 @dp.pre_checkout_query()
-async def pre_checkout_handler(q: PreCheckoutQuery): await bot.answer_pre_checkout_query(q.id, ok=True)
+async def pre_checkout(q: PreCheckoutQuery):
+    await bot.answer_pre_checkout_query(q.id, ok=True)
 
 @dp.message(F.successful_payment)
-async def success_pay(message: Message):
-    days = 9999 if "life" in message.successful_payment.invoice_payload else 30
-    exp = "Навсегда" if days==9999 else (datetime.now() + timedelta(days=days)).strftime("%d.%m.%Y")
-    async with aiosqlite.connect('noryx_users.db') as db:
-        await db.execute("UPDATE users SET role=?, expiry_date=? WHERE user_id=?", ("VIP" if days==9999 else "BETA", exp, message.from_user.id))
+async def payment_success(message: Message):
+    plan = message.successful_payment.invoice_payload.split("_")[1]
+    days = 9999 if plan == "life" else int(plan)
+    exp = "Навсегда" if days == 9999 else (datetime.now() + timedelta(days=days)).strftime("%d.%m.%Y")
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET role=?, expiry_date=? WHERE user_id=?", 
+                         ("VIP" if days == 9999 else "BETA", exp, message.from_user.id))
         await db.commit()
-    await message.answer("🎉 Успешно!")
+    await message.answer(f"🎉 Оплата успешно! Роль обновлена до {exp}")
 
+# --- 🛡 АДМИНКА ---
+
+@dp.callback_query(F.data == "admin_main")
+async def admin_panel(callback: CallbackQuery):
+    if callback.from_user.username.lower() != OWNER_USERNAME.lower(): return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Все пользователи", callback_data="admin_users")],
+        [InlineKeyboardButton(text="🔑 Создать ключ", callback_data="admin_gen_key")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")]
+    ])
+    await callback.message.edit_text("🛡 **АДМИН-ПАНЕЛЬ**", reply_markup=kb)
+
+@dp.callback_query(F.data == "admin_users")
+async def admin_list_users(callback: CallbackQuery):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT uid, app_username, role FROM users LIMIT 10") as cur:
+            users = await cur.fetchall()
+    res = "👥 **АККАУНТЫ:**\n" + "\n".join([f"UID: {u[0]} | Логин: {u[1]} | {u[2]}" for u in users])
+    await callback.message.edit_text(res, reply_markup=get_back_kb())
+
+@dp.callback_query(F.data == "admin_gen_key")
+async def admin_gen_step1(callback: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="7 дней", callback_data="g_7"), InlineKeyboardButton(text="30 дней", callback_data="g_30")],
+        [InlineKeyboardButton(text="Навсегда", callback_data="g_9999")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_main")]
+    ])
+    await callback.message.edit_text("На какой срок ключ?", reply_markup=kb)
+
+@dp.callback_query(F.data.startswith("g_"))
+async def admin_gen_step2(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(gen_days=int(callback.data.split("_")[1]))
+    await state.set_state(BotStates.waiting_for_activations)
+    await callback.message.edit_text("Количество активаций:")
+
+@dp.message(BotStates.waiting_for_activations)
+async def admin_gen_step3(message: Message, state: FSMContext):
+    if not message.text.isdigit(): return
+    data = await state.get_data()
+    key = f"NORYX-{''.join(random.choices(string.ascii_uppercase + string.digits, k=10))}"
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT INTO generated_keys VALUES (?, ?, ?, ?)", 
+                         (key, data['gen_days'], 'BETA' if data['gen_days']<9999 else 'VIP', int(message.text)))
+        await db.commit()
+    await state.clear()
+    await message.answer(f"✅ Ключ создан: `{key}`", parse_mode="Markdown", reply_markup=get_back_kb())
+
+# --- 🔑 КЛЮЧИ И ПРОМО ---
+
+@dp.callback_query(F.data == "activate_key")
+async def key_start(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(BotStates.waiting_for_key)
+    await callback.message.edit_text("🔑 Введите лицензионный ключ:", reply_markup=get_back_kb())
+
+@dp.message(BotStates.waiting_for_key)
+async def key_proc(message: Message, state: FSMContext):
+    k = message.text.strip()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT days, role, activations_left FROM generated_keys WHERE key_code=?", (k,)) as cur:
+            res = await cur.fetchone()
+        if res:
+            days, role, left = res
+            exp = "Навсегда" if days == 9999 else (datetime.now() + timedelta(days=days)).strftime("%d.%m.%Y")
+            await db.execute("UPDATE users SET role=?, expiry_date=? WHERE user_id=?", (role, exp, message.from_user.id))
+            if left > 1: await db.execute("UPDATE generated_keys SET activations_left=left-1 WHERE key_code=?", (k,))
+            else: await db.execute("DELETE FROM generated_keys WHERE key_code=?", (k,))
+            await db.commit()
+            await state.clear()
+            await message.answer(f"✅ Успешно! Роль {role} активирована.", reply_markup=get_main_kb(role, message.from_user.username))
+        else: await message.answer("❌ Ключ не найден!")
+
+@dp.callback_query(F.data == "back_main")
+async def back_to_main(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    u = await get_user_by_tg(callback.from_user.id)
+    if not u:
+        await callback.message.edit_text("Авторизуйтесь:", reply_markup=get_auth_kb())
+    else:
+        await callback.message.edit_text(f"🌟 **NORYX — МЕНЮ**\n{LINE}", reply_markup=get_main_kb(u[5], callback.from_user.username))
+
+# --- 🚀 СТАРТ ---
 async def main():
     await init_db()
-    print("🚀 BOT IS RUNNING")
+    print(f"🚀 Бот в сети! БД: {DB_PATH}")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
     asyncio.run(main())
+    
