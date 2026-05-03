@@ -88,9 +88,9 @@ async def get_user_data(user_id: int, first_name: str, username: str):
 # --- ⌨️ КЛАВИАТУРЫ ---
 def get_main_kb(username: str, role: str):
     kb = [
-        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
+        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
         [InlineKeyboardButton(text="🎭 Префиксы", callback_data="prefix_menu")],
-        [InlineKeyboardButton(text="🔑 Активация", callback_data="activate_key"),
+        [InlineKeyboardButton(text="🔑 Активация", callback_data="activate_key")],
         [InlineKeyboardButton(text="📁 СКАЧАТЬ BETA", callback_data="download_beta")],
         [InlineKeyboardButton(text="🛒 Магазин", callback_data="buy_beta")],
         [InlineKeyboardButton(text="🎁 Промокод", callback_data="promo")]
