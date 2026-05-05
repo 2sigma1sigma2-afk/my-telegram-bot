@@ -14,7 +14,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 # ================= ⚙️ НАСТРОЙКИ ⚙️ =================
-BOT_TOKEN = '7716127075:AAEs55gkC1Dk6NcC9tAdkW-6oM-5bRcag-w'
+BOT_TOKEN = '8620470884:AAHEmuEgvLLLSj_FoCos9JTApMZ2JNW0O3E'
 OWNER_USERNAME = 'illusiononce'
 
 # Цены в Telegram Stars (XTR)
